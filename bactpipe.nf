@@ -49,6 +49,7 @@ process screen_for_contaminants {
 
     input:
     set pair_id, file(reads) from mash_input
+    file ref_sketches
 
     output:
     set pair_id, stdout into screening_results
