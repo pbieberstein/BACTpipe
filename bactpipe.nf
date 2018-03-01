@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 // vim: syntax=groovy expandtab
 
-bactpipe_version = '2.2b-dev'
+bactpipe_version = '2.3b-dev'
 nf_required_version = '0.26.0'
 
 log.info "".center(60, "=")
@@ -67,7 +67,6 @@ if ( missing_parameters ) {
 ref_sketches = file( params.mashscreen_database )
 bbduk_adapters = file( params.bbduk_adapters )
 
-
 process screen_for_contaminants {
     validExitStatus 0,3
     tag { pair_id }
@@ -78,7 +77,7 @@ process screen_for_contaminants {
     file ref_sketches
 
     output:
-    set pair_id, stdout into screening_results
+    set pair_id, stdout into screening_results_for_bbduk, screening_results_for_prokka
     file("${pair_id}.mash_screen.tsv")
     file("${pair_id}.screening_results.tsv")
 
@@ -93,9 +92,9 @@ process screen_for_contaminants {
         > ${pair_id}.mash_screen.tsv \
     && \
     assess_mash_screen.py \
-        --pipeline \
-        --outfile ${pair_id}.screening_results.tsv \
-        ${pair_id}.mash_screen.tsv 
+        --gram "$baseDir/resources/gram_stain.txt"  \
+        ${pair_id}.mash_screen.tsv \
+        | tee ${pair_id}.screening_results.tsv
     """
 }
 
@@ -104,8 +103,9 @@ process screen_for_contaminants {
  * Check screening results. Print warning for samples that did not pass.
  * Continue only with samples that pass the contaminant screening step.
  */
-pure_isolates = screening_results.filter { 
-    def passed=it[1] == "PASS"
+pure_isolates = screening_results_for_bbduk.filter {
+    screening_result = it[1].split("\t")[1]
+    passed = screening_result == "PASS"
     if ( ! passed ) {
         log.warn "'${it[0]}' might not be a pure isolate! Check screening results in the output folder."
     }
@@ -198,16 +198,44 @@ process shovill {
 }
 
 
+/*
+ * Read expected gram stain from the assess_mash_screen output,
+ * for use in Prokka.
+ * Explanation of how this works:
+ * from_shovill = [pair_id, contigs.fa]
+ * from_screen = [pair_id, "sample\tPASS\tneg\tHelicobacter pylori"]
+ * prokka_input = [pair_id, contigs.fa, "sample\tPASS\tneg\tHelicobacter pylori"]
+ */
+prokka_input = prokka_channel.join(screening_results_for_prokka).map {
+    [it[0], it[1], it[2].split("\t")[2]]
+}
+
+
 process prokka {
     tag {sample_id}
     publishDir "${params.output_dir}/prokka", mode: 'copy'
 
     input:
-    set sample_id, file(renamed_contigs) from prokka_channel
+    set sample_id, file(renamed_contigs), gram_stain from prokka_input
 
     output:
     set sample_id, file("${sample_id}_prokka") into prokka_out
 
+    script:
+    prokka_reference_argument = ""
+    if (params.prokka_reference) {
+        prokka_reference_argument = "--proteins ${params.prokka_reference}"
+    }
+    gram_stain_argument = ""
+    if (gram_stain) {
+        gram_stain_argument = "--gram ${gram_stain}"
+    }
+    if (params.prokka_gram_stain) {
+        gram_stain_argument = "--gram ${params.prokka_gram_stain}"
+        log.warn "Overriding automatically determined gram stain (${gram_stain}) " +
+                    "due to user configured setting (${params.prokka_gram_stain})."
+    }
+    
     """
     prokka \
         --force \
@@ -217,6 +245,9 @@ process prokka {
         --outdir ${sample_id}_prokka \
         --prefix ${sample_id} \
         --strain ${sample_id} \
+        ${params.prokka_reference} \
+        ${prokka_reference_argument} \
+        ${gram_stain_argument} \
         $renamed_contigs
     """
 }
